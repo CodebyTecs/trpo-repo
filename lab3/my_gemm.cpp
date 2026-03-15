@@ -1,6 +1,20 @@
 #include "my_gemm.h"
 
+#include <thread>
+#include <vector>
+
 using namespace std;
+
+int g_my_threads = 1;
+
+void my_set_num_threads(int t) {
+    if (t < 1) t = 1;
+    g_my_threads = t;
+}
+
+int my_get_num_threads() {
+    return g_my_threads;
+}
 
 int is_trans(enum CBLAS_TRANSPOSE t) {
     return (t == CblasTrans || t == CblasConjTrans);
@@ -126,21 +140,13 @@ openblas_complex_double getB_z(const openblas_complex_double* B, int ldb, int p,
     return v;
 }
 
-bool my_sgemm(enum CBLAS_ORDER Order, enum CBLAS_TRANSPOSE TransA, enum CBLAS_TRANSPOSE TransB,
-              int M, int N, int K, float alpha, const float *A, int lda,
-              const float *B, int ldb, float beta, float *C, int ldc) {
-    if (!check_params(Order, TransA, TransB, M, N, K, lda, ldb, ldc)) return false;
-    if (M == 0 || N == 0) return true;
-
-    for (int i = 0; i < M; i++) {
-        for (int j = 0; j < N; j++) {
-            C[i * ldc + j] = beta * C[i * ldc + j];
-        }
-    }
-
-    if (K == 0) return true;
-
-    for (int i = 0; i < M; i++) {
+void sgemm_range(int i0, int i1,
+                 enum CBLAS_TRANSPOSE TransA, enum CBLAS_TRANSPOSE TransB,
+                 int M, int N, int K, float alpha, const float* A, int lda,
+                 const float* B, int ldb, float beta, float* C, int ldc) {
+    for (int i = i0; i < i1; i++) {
+        for (int j = 0; j < N; j++) C[i * ldc + j] = beta * C[i * ldc + j];
+        if (K == 0) continue;
         for (int p = 0; p < K; p++) {
             float a = alpha * getA_f(A, lda, i, p, TransA);
             for (int j = 0; j < N; j++) {
@@ -148,7 +154,104 @@ bool my_sgemm(enum CBLAS_ORDER Order, enum CBLAS_TRANSPOSE TransA, enum CBLAS_TR
             }
         }
     }
+}
 
+void dgemm_range(int i0, int i1,
+                 enum CBLAS_TRANSPOSE TransA, enum CBLAS_TRANSPOSE TransB,
+                 int M, int N, int K, double alpha, const double* A, int lda,
+                 const double* B, int ldb, double beta, double* C, int ldc) {
+    for (int i = i0; i < i1; i++) {
+        for (int j = 0; j < N; j++) C[i * ldc + j] = beta * C[i * ldc + j];
+        if (K == 0) continue;
+        for (int p = 0; p < K; p++) {
+            double a = alpha * getA_d(A, lda, i, p, TransA);
+            for (int j = 0; j < N; j++) {
+                C[i * ldc + j] += a * getB_d(B, ldb, p, j, TransB);
+            }
+        }
+    }
+}
+
+void cgemm_range(int i0, int i1,
+                 enum CBLAS_TRANSPOSE TransA, enum CBLAS_TRANSPOSE TransB,
+                 int M, int N, int K, openblas_complex_float alpha, const openblas_complex_float* A, int lda,
+                 const openblas_complex_float* B, int ldb, openblas_complex_float beta, openblas_complex_float* C, int ldc) {
+    for (int i = i0; i < i1; i++) {
+        for (int j = 0; j < N; j++) C[i * ldc + j] = cf_mul(beta, C[i * ldc + j]);
+        if (K == 0) continue;
+        for (int p = 0; p < K; p++) {
+            openblas_complex_float av = getA_c(A, lda, i, p, TransA);
+            openblas_complex_float aav = cf_mul(alpha, av);
+            for (int j = 0; j < N; j++) {
+                openblas_complex_float bv = getB_c(B, ldb, p, j, TransB);
+                C[i * ldc + j] = cf_add(C[i * ldc + j], cf_mul(aav, bv));
+            }
+        }
+    }
+}
+
+void zgemm_range(int i0, int i1,
+                 enum CBLAS_TRANSPOSE TransA, enum CBLAS_TRANSPOSE TransB,
+                 int M, int N, int K, openblas_complex_double alpha, const openblas_complex_double* A, int lda,
+                 const openblas_complex_double* B, int ldb, openblas_complex_double beta, openblas_complex_double* C, int ldc) {
+    for (int i = i0; i < i1; i++) {
+        for (int j = 0; j < N; j++) C[i * ldc + j] = cd_mul(beta, C[i * ldc + j]);
+        if (K == 0) continue;
+        for (int p = 0; p < K; p++) {
+            openblas_complex_double av = getA_z(A, lda, i, p, TransA);
+            openblas_complex_double aav = cd_mul(alpha, av);
+            for (int j = 0; j < N; j++) {
+                openblas_complex_double bv = getB_z(B, ldb, p, j, TransB);
+                C[i * ldc + j] = cd_add(C[i * ldc + j], cd_mul(aav, bv));
+            }
+        }
+    }
+}
+
+void run_threads(int M, int threads, vector<thread>& th, vector<int>& cuts) {
+    if (threads < 1) threads = 1;
+    if (threads > M) threads = M;
+
+    cuts.clear();
+    cuts.reserve(threads + 1);
+    cuts.push_back(0);
+
+    int base = M / threads;
+    int rem = M % threads;
+    int cur = 0;
+
+    for (int i = 0; i < threads; i++) {
+        cur += base + (i < rem ? 1 : 0);
+        cuts.push_back(cur);
+    }
+}
+
+bool my_sgemm(enum CBLAS_ORDER Order, enum CBLAS_TRANSPOSE TransA, enum CBLAS_TRANSPOSE TransB,
+              int M, int N, int K, float alpha, const float *A, int lda,
+              const float *B, int ldb, float beta, float *C, int ldc) {
+    if (!check_params(Order, TransA, TransB, M, N, K, lda, ldb, ldc)) return false;
+    if (M == 0 || N == 0) return true;
+
+    int t = g_my_threads;
+    if (t < 1) t = 1;
+    if (t > M) t = M;
+
+    if (t == 1) {
+        sgemm_range(0, M, TransA, TransB, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return true;
+    }
+
+    vector<thread> th;
+    vector<int> cuts;
+    run_threads(M, t, th, cuts);
+
+    for (int i = 0; i < t; i++) {
+        int i0 = cuts[i];
+        int i1 = cuts[i + 1];
+        th.emplace_back(sgemm_range, i0, i1, TransA, TransB, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    }
+
+    for (auto& x : th) x.join();
     return true;
 }
 
@@ -158,23 +261,26 @@ bool my_dgemm(enum CBLAS_ORDER Order, enum CBLAS_TRANSPOSE TransA, enum CBLAS_TR
     if (!check_params(Order, TransA, TransB, M, N, K, lda, ldb, ldc)) return false;
     if (M == 0 || N == 0) return true;
 
-    for (int i = 0; i < M; i++) {
-        for (int j = 0; j < N; j++) {
-            C[i * ldc + j] = beta * C[i * ldc + j];
-        }
+    int t = g_my_threads;
+    if (t < 1) t = 1;
+    if (t > M) t = M;
+
+    if (t == 1) {
+        dgemm_range(0, M, TransA, TransB, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return true;
     }
 
-    if (K == 0) return true;
+    vector<thread> th;
+    vector<int> cuts;
+    run_threads(M, t, th, cuts);
 
-    for (int i = 0; i < M; i++) {
-        for (int p = 0; p < K; p++) {
-            double a = alpha * getA_d(A, lda, i, p, TransA);
-            for (int j = 0; j < N; j++) {
-                C[i * ldc + j] += a * getB_d(B, ldb, p, j, TransB);
-            }
-        }
+    for (int i = 0; i < t; i++) {
+        int i0 = cuts[i];
+        int i1 = cuts[i + 1];
+        th.emplace_back(dgemm_range, i0, i1, TransA, TransB, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
     }
 
+    for (auto& x : th) x.join();
     return true;
 }
 
@@ -191,26 +297,26 @@ bool my_cgemm(enum CBLAS_ORDER Order, enum CBLAS_TRANSPOSE TransA, enum CBLAS_TR
     const openblas_complex_float* Bp = (const openblas_complex_float*)B;
     openblas_complex_float* Cp = (openblas_complex_float*)C;
 
-    for (int i = 0; i < M; i++) {
-        for (int j = 0; j < N; j++) {
-            Cp[i * ldc + j] = cf_mul(b, Cp[i * ldc + j]);
-        }
+    int t = g_my_threads;
+    if (t < 1) t = 1;
+    if (t > M) t = M;
+
+    if (t == 1) {
+        cgemm_range(0, M, TransA, TransB, M, N, K, a, Ap, lda, Bp, ldb, b, Cp, ldc);
+        return true;
     }
 
-    if (K == 0) return true;
+    vector<thread> th;
+    vector<int> cuts;
+    run_threads(M, t, th, cuts);
 
-    for (int i = 0; i < M; i++) {
-        for (int p = 0; p < K; p++) {
-            openblas_complex_float av = getA_c(Ap, lda, i, p, TransA);
-            openblas_complex_float aav = cf_mul(a, av);
-            for (int j = 0; j < N; j++) {
-                openblas_complex_float bv = getB_c(Bp, ldb, p, j, TransB);
-                openblas_complex_float add = cf_mul(aav, bv);
-                Cp[i * ldc + j] = cf_add(Cp[i * ldc + j], add);
-            }
-        }
+    for (int i = 0; i < t; i++) {
+        int i0 = cuts[i];
+        int i1 = cuts[i + 1];
+        th.emplace_back(cgemm_range, i0, i1, TransA, TransB, M, N, K, a, Ap, lda, Bp, ldb, b, Cp, ldc);
     }
 
+    for (auto& x : th) x.join();
     return true;
 }
 
@@ -227,25 +333,25 @@ bool my_zgemm(enum CBLAS_ORDER Order, enum CBLAS_TRANSPOSE TransA, enum CBLAS_TR
     const openblas_complex_double* Bp = (const openblas_complex_double*)B;
     openblas_complex_double* Cp = (openblas_complex_double*)C;
 
-    for (int i = 0; i < M; i++) {
-        for (int j = 0; j < N; j++) {
-            Cp[i * ldc + j] = cd_mul(b, Cp[i * ldc + j]);
-        }
+    int t = g_my_threads;
+    if (t < 1) t = 1;
+    if (t > M) t = M;
+
+    if (t == 1) {
+        zgemm_range(0, M, TransA, TransB, M, N, K, a, Ap, lda, Bp, ldb, b, Cp, ldc);
+        return true;
     }
 
-    if (K == 0) return true;
+    vector<thread> th;
+    vector<int> cuts;
+    run_threads(M, t, th, cuts);
 
-    for (int i = 0; i < M; i++) {
-        for (int p = 0; p < K; p++) {
-            openblas_complex_double av = getA_z(Ap, lda, i, p, TransA);
-            openblas_complex_double aav = cd_mul(a, av);
-            for (int j = 0; j < N; j++) {
-                openblas_complex_double bv = getB_z(Bp, ldb, p, j, TransB);
-                openblas_complex_double add = cd_mul(aav, bv);
-                Cp[i * ldc + j] = cd_add(Cp[i * ldc + j], add);
-            }
-        }
+    for (int i = 0; i < t; i++) {
+        int i0 = cuts[i];
+        int i1 = cuts[i + 1];
+        th.emplace_back(zgemm_range, i0, i1, TransA, TransB, M, N, K, a, Ap, lda, Bp, ldb, b, Cp, ldc);
     }
 
+    for (auto& x : th) x.join();
     return true;
 }

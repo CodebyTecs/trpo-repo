@@ -1,6 +1,11 @@
+#pragma once
+
 #include <cblas.h>
 
 using namespace std;
+
+void my_set_num_threads(int t);
+int my_get_num_threads();
 
 bool my_sgemm(enum CBLAS_ORDER Order, enum CBLAS_TRANSPOSE TransA, enum CBLAS_TRANSPOSE TransB,
               int M, int N, int K, float alpha, const float *A, int lda,
