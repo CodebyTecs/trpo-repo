@@ -1,8 +1,10 @@
 #pragma once
 
-#include <cblas.h>
+#ifndef FORCE_OPENBLAS_COMPLEX_STRUCT
+#define FORCE_OPENBLAS_COMPLEX_STRUCT
+#endif
 
-using namespace std;
+#include <cblas.h>
 
 void my_set_num_threads(int t);
 int my_get_num_threads();

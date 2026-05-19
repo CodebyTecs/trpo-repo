@@ -1,4 +1,3 @@
-#include <cblas.h>
 #include <cstdio>
 #include <vector>
 #include <random>
