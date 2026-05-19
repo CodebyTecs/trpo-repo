@@ -1,0 +1,31 @@
+name: Lab 3 CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: lab3
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libopenblas-dev
+
+      - name: Build benchmark
+        run: make build
+
+      - name: Run interface tests
+        run: make test
+
+      - name: Run performance tests
+        run: make perf

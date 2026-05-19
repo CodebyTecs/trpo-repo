@@ -1,0 +1,8 @@
+.build/
+bench
+interface_tests
+performance_tests
+*.o
+*.out
+*.dSYM/
+.DS_Store
